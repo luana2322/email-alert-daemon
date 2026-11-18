@@ -1,0 +1,300 @@
+/**
+ * imap-listener.js - Manages persistent IMAP IDLE connections for a single email account.
+ * Automatically discovers and monitors BOTH primary INBOX and SPAM/JUNK folders in real-time.
+ */
+
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
+const { notifyNewEmail } = require('./notifier');
+
+class MailboxWatcher {
+  constructor(account, mailboxPath, isSpam, logPrefix, onNotification) {
+    this.account = account;
+    this.mailboxPath = mailboxPath;
+    this.isSpam = isSpam;
+    this.logPrefix = logPrefix;
+    this.onNotification = onNotification;
+
+    this.client = null;
+    this.isStopping = false;
+    this.initialSyncDone = false;
+    this.lastCount = 0;
+    this.processedUids = new Set();
+  }
+
+  log(msg) {
+    const time = new Date().toLocaleTimeString();
+    console.log(`[${time}] [${this.logPrefix}] ${msg}`);
+  }
+
+  error(msg, err) {
+    const time = new Date().toLocaleTimeString();
+    console.error(`[${time}] [${this.logPrefix}] ❌ ${msg}`, err ? (err.message || err) : '');
+  }
+
+  async start() {
+    this.isStopping = false;
+    await this.connectAndListen();
+  }
+
+  async stop() {
+    this.isStopping = true;
+    if (this.client) {
+      try {
+        await this.client.logout();
+      } catch (_) {}
+      this.client = null;
+    }
+  }
+
+  async connectAndListen() {
+    if (this.isStopping) return;
+
+    this.client = new ImapFlow({
+      host: this.account.host,
+      port: this.account.port || 993,
+      secure: this.account.secure !== false,
+      auth: this.account.auth,
+      logger: false,
+      clientInfo: {
+        name: 'EmailAlertDaemon',
+        version: '1.1.0'
+      }
+    });
+
+    this.client.on('error', (err) => {
+      this.error('IMAP Client Error:', err);
+    });
+
+    this.client.on('close', () => {
+      this.log('Connection closed.');
+      if (!this.isStopping) {
+        this.scheduleReconnect();
+      }
+    });
+
+    try {
+      await this.client.connect();
+      await this.client.mailboxOpen(this.mailboxPath);
+
+      const status = await this.client.status(this.mailboxPath, { messages: true, uidNext: true });
+      this.lastCount = status.messages || 0;
+      this.log(`Active on "${this.mailboxPath}" (${this.isSpam ? 'SPAM/JUNK' : 'INBOX'}). Messages: ${this.lastCount}`);
+      this.initialSyncDone = true;
+
+      // Handle new messages arriving via IMAP IDLE exists event
+      this.client.on('exists', async (data) => {
+        if (!this.initialSyncDone) return;
+        const newCount = data.count;
+        this.log(`📬 Message event detected on "${this.mailboxPath}" (Count: ${newCount})`);
+        await this.handleNewMessages(newCount);
+      });
+
+      // Maintain persistent IDLE loop
+      while (!this.isStopping && this.client && this.client.usable) {
+        try {
+          await this.client.idle();
+        } catch (idleErr) {
+          if (this.isStopping) break;
+        }
+      }
+    } catch (err) {
+      this.error(`Failed to watch "${this.mailboxPath}":`, err);
+      if (!this.isStopping) {
+        this.scheduleReconnect();
+      }
+    }
+  }
+
+  async handleNewMessages(currentCount) {
+    if (!this.client || !this.client.usable) return;
+
+    const fromSeq = Math.max(1, (this.lastCount > 0 ? this.lastCount + 1 : currentCount));
+    this.lastCount = currentCount;
+
+    try {
+      const range = `${fromSeq}:*`;
+      for await (const message of this.client.fetch(range, {
+        uid: true,
+        envelope: true,
+        source: true,
+        flags: true
+      })) {
+        const uid = message.uid;
+        if (this.processedUids.has(uid)) continue;
+        this.processedUids.add(uid);
+
+        if (this.processedUids.size > 1000) {
+          const arr = Array.from(this.processedUids);
+          this.processedUids = new Set(arr.slice(arr.length - 500));
+        }
+
+        const fromObj = (message.envelope.from && message.envelope.from[0]) || {};
+        const senderName = fromObj.name
+          ? `"${fromObj.name}" <${fromObj.address}>`
+          : (fromObj.address || 'Unknown Sender');
+
+        let rawSubject = message.envelope.subject || '(Không có tiêu đề)';
+        let subject = this.isSpam ? `[SPAM / Thư rác] ${rawSubject}` : rawSubject;
+        const receivedAt = message.envelope.date ? message.envelope.date.toISOString() : new Date().toISOString();
+        const messageId = message.envelope.messageId || `uid_${uid}_${Date.now()}`;
+
+        let snippet = '';
+        if (message.source) {
+          try {
+            const parsed = await simpleParser(message.source);
+            const textContent = (parsed.text || parsed.intro || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .substring(0, 300);
+            snippet = this.isSpam
+              ? `[Thư bị xếp vào Thư rác]: ${textContent}`
+              : textContent;
+          } catch (_) {
+            snippet = subject;
+          }
+        }
+
+        this.log(`🚨 Incoming email (${this.isSpam ? 'SPAM' : 'INBOX'}): "${subject}" from ${senderName}`);
+
+        await this.onNotification({
+          messageId,
+          recipientAccount: this.account.email,
+          sender: senderName,
+          subject,
+          snippet,
+          receivedAt,
+          webUrl: this.getWebMailUrl()
+        });
+      }
+    } catch (fetchErr) {
+      this.error('Failed to fetch new message details:', fetchErr);
+    }
+  }
+
+  getWebMailUrl() {
+    if (this.account.email.includes('@gmail.com')) {
+      return 'https://mail.google.com';
+    } else if (this.account.email.includes('@outlook.com') || this.account.email.includes('@hotmail.com')) {
+      return 'https://outlook.live.com';
+    }
+    return `https://${this.account.host}`;
+  }
+
+  scheduleReconnect() {
+    if (this.isStopping) return;
+    const delay = parseInt(process.env.RECONNECT_DELAY_MS || '10000', 10);
+    this.log(`Reconnecting "${this.mailboxPath}" in ${delay / 1000}s...`);
+    setTimeout(() => {
+      this.connectAndListen();
+    }, delay);
+  }
+}
+
+class ImapAccountListener {
+  constructor(accountConfig) {
+    this.account = accountConfig;
+    this.accountName = accountConfig.accountName || accountConfig.email;
+    this.email = accountConfig.email;
+    this.isStopping = false;
+    this.watchers = [];
+  }
+
+  log(msg) {
+    const time = new Date().toLocaleTimeString();
+    console.log(`[${time}] [${this.accountName}] ${msg}`);
+  }
+
+  error(msg, err) {
+    const time = new Date().toLocaleTimeString();
+    console.error(`[${time}] [${this.accountName}] ❌ ${msg}`, err ? (err.message || err) : '');
+  }
+
+  async start() {
+    this.isStopping = false;
+    await this.discoverAndStartWatchers();
+  }
+
+  async stop() {
+    this.isStopping = true;
+    for (const watcher of this.watchers) {
+      await watcher.stop();
+    }
+    this.watchers = [];
+    this.log('All mailbox watchers stopped.');
+  }
+
+  async discoverAndStartWatchers() {
+    if (this.isStopping) return;
+
+    this.log(`Discovering mailboxes on ${this.account.host}...`);
+
+    let probeClient = null;
+    let mailboxes = [];
+    try {
+      probeClient = new ImapFlow({
+        host: this.account.host,
+        port: this.account.port || 993,
+        secure: this.account.secure !== false,
+        auth: this.account.auth,
+        logger: false
+      });
+
+      await probeClient.connect();
+      mailboxes = await probeClient.list();
+      await probeClient.logout();
+      probeClient = null;
+    } catch (probeErr) {
+      this.error('Mailbox discovery probe failed:', probeErr);
+      // Fallback: Default to INBOX
+      mailboxes = [{ path: 'INBOX', specialUse: '\\Inbox' }];
+    }
+
+    if (this.isStopping) return;
+
+    // 1. Identify primary INBOX
+    let inboxPath = 'INBOX';
+    const inboxBox = mailboxes.find(m => m.specialUse === '\\Inbox');
+    if (inboxBox) inboxPath = inboxBox.path;
+
+    // 2. Identify SPAM / JUNK folder
+    let spamPath = null;
+    const junkBox = mailboxes.find(m => m.specialUse === '\\Junk');
+    if (junkBox) {
+      spamPath = junkBox.path;
+    } else {
+      const match = mailboxes.find(m => /(spam|junk|thư rác)/i.test(m.path) || /(spam|junk|thư rác)/i.test(m.name));
+      if (match) spamPath = match.path;
+    }
+
+    this.log(`Target mailboxes => INBOX: "${inboxPath}" | SPAM: "${spamPath || 'Not Found'}"`);
+
+    // Start INBOX Watcher
+    const inboxWatcher = new MailboxWatcher(
+      this.account,
+      inboxPath,
+      false,
+      `${this.accountName}/INBOX`,
+      notifyNewEmail
+    );
+    this.watchers.push(inboxWatcher);
+    inboxWatcher.start().catch(err => this.error('Inbox watcher crashed:', err));
+
+    // Start SPAM Watcher if folder exists
+    if (spamPath) {
+      const spamWatcher = new MailboxWatcher(
+        this.account,
+        spamPath,
+        true,
+        `${this.accountName}/SPAM`,
+        notifyNewEmail
+      );
+      this.watchers.push(spamWatcher);
+      spamWatcher.start().catch(err => this.error('Spam watcher crashed:', err));
+    }
+  }
+}
+
+module.exports = {
+  ImapAccountListener
+};

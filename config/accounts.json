@@ -1,0 +1,35 @@
+[
+  {
+    "accountName": "Tài khoản 1 (Gmail)",
+    "email": "thailuanpy1234@gmail.com",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "thailuanpy1234@gmail.com",
+      "pass": "dien_app_password_vao_day"
+    }
+  },
+  {
+    "accountName": "Gmail (bilamd633)",
+    "email": "bilamd633@gmail.com",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "bilamd633@gmail.com",
+      "pass": "uwsy xbap xtvq vraj"
+    }
+  },
+  {
+    "accountName": "Gmail (leehieu355)",
+    "email": "leehieu355@gmail.com",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "leehieu355@gmail.com",
+      "pass": "vrgl lkio wwdv mvsz"
+    }
+  }
+]
