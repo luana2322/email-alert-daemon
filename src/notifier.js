@@ -123,11 +123,26 @@ async function sendPushAlert(emailData) {
   }
 }
 
+function getTelegramConfig() {
+  let token = process.env.TELEGRAM_BOT_TOKEN || '';
+  let chat = process.env.TELEGRAM_CHAT_ID || '';
+  try {
+    const teleConfigFile = path.join(__dirname, '..', 'config', 'telegram.json');
+    if (fs.existsSync(teleConfigFile)) {
+      const teleConfig = JSON.parse(fs.readFileSync(teleConfigFile, 'utf8'));
+      if (!token && teleConfig.botToken) token = teleConfig.botToken;
+      if (!chat && teleConfig.chatId) chat = String(teleConfig.chatId);
+    }
+  } catch (_) {}
+  return { token, chat };
+}
+
 /**
  * Send Telegram notification
  */
 async function sendTelegramAlert(emailData) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  const { token, chat } = getTelegramConfig();
+  if (!token || !chat) {
     console.warn(`[Notifier] ⚠️ Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.`);
     return;
   }
@@ -148,14 +163,14 @@ async function sendTelegramAlert(emailData) {
   ];
 
   const text = lines.join('\n');
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: chat,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true
