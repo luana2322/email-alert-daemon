@@ -79,6 +79,22 @@ class MailboxWatcher {
 
       const status = await this.client.status(this.mailboxPath, { messages: true, uidNext: true });
       this.lastCount = status.messages || 0;
+
+      // Seed processedUids with existing messages so only new ones notify
+      if (this.lastCount > 0) {
+        try {
+          const seedLock = await this.client.getMailboxLock(this.mailboxPath);
+          try {
+            const seedSeq = Math.max(1, this.lastCount - 15);
+            for await (const m of this.client.fetch({ seq: `${seedSeq}:*` }, { uid: true })) {
+              this.processedUids.add(m.uid);
+            }
+          } finally {
+            seedLock.release();
+          }
+        } catch (_) {}
+      }
+
       this.log(`Active on "${this.mailboxPath}" (${this.isSpam ? 'SPAM/JUNK' : 'INBOX'}). Messages: ${this.lastCount}`);
       this.initialSyncDone = true;
 
@@ -109,10 +125,15 @@ class MailboxWatcher {
   async handleNewMessages(currentCount) {
     if (!this.client || !this.client.usable) return;
 
-    const fromSeq = Math.max(1, (this.lastCount > 0 ? this.lastCount + 1 : currentCount));
-    this.lastCount = currentCount;
-
+    let lock;
     try {
+      lock = await this.client.getMailboxLock(this.mailboxPath);
+
+      const status = await this.client.status(this.mailboxPath, { messages: true });
+      const actualCount = status.messages || currentCount;
+      const fromSeq = Math.max(1, (this.lastCount > 0 ? this.lastCount + 1 : actualCount));
+      this.lastCount = actualCount;
+
       const range = `${fromSeq}:*`;
       for await (const message of this.client.fetch(range, {
         uid: true,
@@ -169,6 +190,10 @@ class MailboxWatcher {
       }
     } catch (fetchErr) {
       this.error('Failed to fetch new message details:', fetchErr);
+    } finally {
+      if (lock) {
+        lock.release();
+      }
     }
   }
 

@@ -2,12 +2,29 @@
  * notifier.js - Dispatches alert notifications to Cloudflare Worker Gateway and Telegram.
  */
 
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const PUSH_GATEWAY_URL = (process.env.PUSH_GATEWAY_URL || 'https://email-alert-push-gateway.luana-email-alert.workers.dev').replace(/\/+$/, '');
 const PUSH_API_SECRET = process.env.PUSH_API_SECRET || 'MyPushSecret2026';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+let TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+let TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+// Fallback to config/telegram.json if environment variables not set
+try {
+  const teleConfigFile = path.join(__dirname, '..', 'config', 'telegram.json');
+  if (fs.existsSync(teleConfigFile)) {
+    const teleConfig = JSON.parse(fs.readFileSync(teleConfigFile, 'utf8'));
+    if (!TELEGRAM_BOT_TOKEN && teleConfig.botToken) {
+      TELEGRAM_BOT_TOKEN = teleConfig.botToken;
+    }
+    if (!TELEGRAM_CHAT_ID && teleConfig.chatId) {
+      TELEGRAM_CHAT_ID = String(teleConfig.chatId);
+    }
+  }
+} catch (_) {}
 
 /**
  * Escape HTML for Telegram
@@ -111,7 +128,8 @@ async function sendPushAlert(emailData) {
  */
 async function sendTelegramAlert(emailData) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    return; // Telegram not configured, skip silently
+    console.warn(`[Notifier] ⚠️ Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.`);
+    return;
   }
 
   const dateStr = emailData.receivedAt ? new Date(emailData.receivedAt).toLocaleString('vi-VN') : new Date().toLocaleString('vi-VN');

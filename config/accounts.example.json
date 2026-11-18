@@ -1,0 +1,47 @@
+[
+  {
+    "accountName": "Gmail Cá Nhân",
+    "email": "user1@gmail.com",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "user1@gmail.com",
+      "pass": "xxxx yyyy zzzz wwww"
+    }
+  },
+  {
+    "accountName": "Gmail Công Việc",
+    "email": "work@gmail.com",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "work@gmail.com",
+      "pass": "aaaa bbbb cccc dddd"
+    }
+  },
+  {
+    "accountName": "Outlook / Microsoft 365",
+    "email": "mywork@outlook.com",
+    "host": "outlook.office365.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "mywork@outlook.com",
+      "pass": "your_password"
+    }
+  },
+  {
+    "accountName": "Email Tên Miền Riêng (cPanel/Zimbra/Postfix)",
+    "email": "contact@yourcompany.com",
+    "host": "mail.yourcompany.com",
+    "port": 993,
+    "secure": true,
+    "auth": {
+      "user": "contact@yourcompany.com",
+      "pass": "your_password"
+    }
+  }
+]
+
