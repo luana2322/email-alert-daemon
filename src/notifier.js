@@ -81,14 +81,28 @@ async function sendPushAlert(emailData) {
   const directEndpoint = await getDeviceEndpoint();
   if (directEndpoint) {
     try {
-      const directRes = await fetch(directEndpoint, {
+      // Strip ?up=1 so ntfy caches the notification if device was momentarily asleep, avoiding HTTP 507
+      const cleanEndpoint = directEndpoint.replace(/[?&]up=1/, '');
+      const isSpam = (emailData.subject || '').toUpperCase().includes('[SPAM');
+      const directRes = await fetch(cleanEndpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'TTL': '86400', 'Urgency': 'high' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Title': `🚨 [${emailData.recipientAccount || 'Mail'}] ${emailData.sender}`,
+          'Priority': 'urgent',
+          'Tags': isSpam ? 'warning,skull' : 'incoming_envelope,bell',
+          'Click': emailData.webUrl || 'https://mail.google.com',
+          'TTL': '86400',
+          'Urgency': 'high'
+        },
         body: JSON.stringify(payload)
       });
       if (directRes.ok) {
         console.log(`[Notifier] 📲 Android Push delivered directly to phone for [${emailData.recipientAccount}] "${emailData.subject}"`);
         return;
+      } else {
+        const statusText = await directRes.text();
+        console.warn(`[Notifier] Direct delivery returned ${directRes.status}: ${statusText}. Trying gateway...`);
       }
     } catch (directErr) {
       console.warn(`[Notifier] Direct delivery failed: ${directErr.message}. Trying gateway...`);
