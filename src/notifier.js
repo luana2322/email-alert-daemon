@@ -137,6 +137,19 @@ async function sendPushAlert(emailData) {
   }
 }
 
+const sentMessageCache = new Map(); // messageId -> timestamp
+const telegramQueue = [];
+let isProcessingTelegram = false;
+
+function cleanSentCache() {
+  const now = Date.now();
+  for (const [id, time] of sentMessageCache.entries()) {
+    if (now - time > 86400000) { // older than 24h
+      sentMessageCache.delete(id);
+    }
+  }
+}
+
 function getTelegramConfig() {
   let token = process.env.TELEGRAM_BOT_TOKEN || '';
   let chat = process.env.TELEGRAM_CHAT_ID || '';
@@ -152,9 +165,9 @@ function getTelegramConfig() {
 }
 
 /**
- * Send Telegram notification
+ * Send individual Telegram notification with 429 auto-retry
  */
-async function sendTelegramAlert(emailData) {
+async function sendTelegramAlertDirect(emailData) {
   const { token, chat } = getTelegramConfig();
   if (!token || !chat) {
     console.warn(`[Notifier] ⚠️ Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.`);
@@ -179,36 +192,92 @@ async function sendTelegramAlert(emailData) {
   const text = lines.join('\n');
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chat,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-      })
-    });
-    if (res.ok) {
-      console.log(`[Notifier] 💬 Telegram alert sent for [${emailData.recipientAccount}]`);
-    } else {
-      const err = await res.text();
-      console.error(`[Notifier] ❌ Telegram API error: ${err}`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chat,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true
+        })
+      });
+
+      if (res.ok) {
+        console.log(`[Notifier] 💬 Telegram alert sent for [${emailData.recipientAccount}]`);
+        return;
+      }
+
+      const errText = await res.text();
+      if (res.status === 429) {
+        let retrySec = 3;
+        try {
+          const json = JSON.parse(errText);
+          if (json?.parameters?.retry_after) retrySec = json.parameters.retry_after;
+        } catch (_) {}
+        console.warn(`[Notifier] ⏳ Telegram rate limited (429). Pausing for ${retrySec}s before attempt ${attempt + 1}...`);
+        await new Promise(r => setTimeout(r, (retrySec + 1) * 1000));
+        continue;
+      }
+
+      console.error(`[Notifier] ❌ Telegram API error (${res.status}): ${errText}`);
+      return;
+    } catch (err) {
+      console.error(`[Notifier] ❌ Telegram network error (attempt ${attempt}): ${err.message}`);
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-  } catch (err) {
-    console.error(`[Notifier] ❌ Telegram network error: ${err.message}`);
   }
 }
 
 /**
- * Dispatch alert to both channels
+ * Sequential FIFO worker to deliver Telegram messages smoothly with no rate-limit congestion
+ */
+async function processTelegramQueue() {
+  if (isProcessingTelegram) return;
+  isProcessingTelegram = true;
+
+  while (telegramQueue.length > 0) {
+    const item = telegramQueue.shift();
+    try {
+      await sendTelegramAlertDirect(item);
+    } catch (e) {
+      console.error('[Notifier] Error in Telegram queue processing:', e.message);
+    }
+    // Throttle 500ms between messages to comply with Telegram Bot limits (30 msg/sec global, 1 msg/sec/chat)
+    if (telegramQueue.length > 0) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  isProcessingTelegram = false;
+}
+
+function enqueueTelegramAlert(emailData) {
+  telegramQueue.push(emailData);
+  processTelegramQueue();
+}
+
+/**
+ * Dispatch alert to both channels with deduplication
  */
 async function notifyNewEmail(emailData) {
-  await Promise.allSettled([
-    sendPushAlert(emailData),
-    sendTelegramAlert(emailData)
-  ]);
+  cleanSentCache();
+  const dedupKey = `${emailData.recipientAccount}:${emailData.messageId || emailData.subject}`;
+  if (sentMessageCache.has(dedupKey)) {
+    console.log(`[Notifier] 🔁 Duplicate alert suppressed for [${emailData.recipientAccount}] "${emailData.subject}"`);
+    return;
+  }
+  sentMessageCache.set(dedupKey, Date.now());
+
+  // 1. Android Push (instant, async)
+  sendPushAlert(emailData).catch(e => console.error('[Notifier] Push error:', e.message));
+
+  // 2. Telegram Alert (queued & throttled)
+  enqueueTelegramAlert(emailData);
 }
 
 module.exports = {

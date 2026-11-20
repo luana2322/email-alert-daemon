@@ -18,8 +18,9 @@ class MailboxWatcher {
     this.client = null;
     this.isStopping = false;
     this.initialSyncDone = false;
-    this.lastCount = 0;
+    this.highestUid = 0;
     this.processedUids = new Set();
+    this.isHandlingNew = false;
   }
 
   log(msg) {
@@ -78,16 +79,22 @@ class MailboxWatcher {
       await this.client.mailboxOpen(this.mailboxPath);
 
       const status = await this.client.status(this.mailboxPath, { messages: true, uidNext: true });
-      this.lastCount = status.messages || 0;
+      const currentMessages = status.messages || 0;
+      
+      // Initialize highestUid strictly based on IMAP server status
+      this.highestUid = (status.uidNext && status.uidNext > 1) ? status.uidNext - 1 : 0;
 
-      // Seed processedUids with existing messages so only new ones notify
-      if (this.lastCount > 0) {
+      // Seed processedUids with existing messages so only brand-new ones notify
+      if (currentMessages > 0) {
         try {
           const seedLock = await this.client.getMailboxLock(this.mailboxPath);
           try {
-            const seedSeq = Math.max(1, this.lastCount - 15);
+            const seedSeq = Math.max(1, currentMessages - 30);
             for await (const m of this.client.fetch({ seq: `${seedSeq}:*` }, { uid: true })) {
               this.processedUids.add(m.uid);
+              if (m.uid > this.highestUid) {
+                this.highestUid = m.uid;
+              }
             }
           } finally {
             seedLock.release();
@@ -95,18 +102,16 @@ class MailboxWatcher {
         } catch (_) {}
       }
 
-      this.log(`Active on "${this.mailboxPath}" (${this.isSpam ? 'SPAM/JUNK' : 'INBOX'}). Messages: ${this.lastCount}`);
+      this.log(`Active on "${this.mailboxPath}" (${this.isSpam ? 'SPAM/JUNK' : 'INBOX'}). Messages: ${currentMessages}, Highest UID: ${this.highestUid}`);
       this.initialSyncDone = true;
 
       // Handle new messages arriving via IMAP IDLE exists event
-      this.client.on('exists', async (data) => {
+      this.client.on('exists', async () => {
         if (!this.initialSyncDone) return;
-        const newCount = data.count;
-        this.log(`📬 Message event detected on "${this.mailboxPath}" (Count: ${newCount})`);
-        await this.handleNewMessages(newCount);
+        await this.handleNewMessages();
       });
 
-      // Maintain persistent IDLE loop
+      // Maintain persistent IDLE loop (re-entering every 15 mins to keep socket alive)
       while (!this.isStopping && this.client && this.client.usable) {
         try {
           await this.client.idle();
@@ -122,32 +127,33 @@ class MailboxWatcher {
     }
   }
 
-  async handleNewMessages(currentCount) {
-    if (!this.client || !this.client.usable) return;
+  async handleNewMessages() {
+    if (this.isHandlingNew || !this.client || !this.client.usable) return;
+    this.isHandlingNew = true;
 
     let lock;
     try {
       lock = await this.client.getMailboxLock(this.mailboxPath);
 
-      const status = await this.client.status(this.mailboxPath, { messages: true });
-      const actualCount = status.messages || currentCount;
-      const fromSeq = Math.max(1, (this.lastCount > 0 ? this.lastCount + 1 : actualCount));
-      this.lastCount = actualCount;
+      const targetUid = this.highestUid + 1;
+      const range = `${targetUid}:*`;
 
-      const range = `${fromSeq}:*`;
-      for await (const message of this.client.fetch(range, {
+      for await (const message of this.client.fetch({ uid: range }, {
         uid: true,
         envelope: true,
         source: true,
         flags: true
       })) {
         const uid = message.uid;
-        if (this.processedUids.has(uid)) continue;
+        if (uid <= this.highestUid || this.processedUids.has(uid)) continue;
         this.processedUids.add(uid);
+        if (uid > this.highestUid) {
+          this.highestUid = uid;
+        }
 
-        if (this.processedUids.size > 1000) {
+        if (this.processedUids.size > 2000) {
           const arr = Array.from(this.processedUids);
-          this.processedUids = new Set(arr.slice(arr.length - 500));
+          this.processedUids = new Set(arr.slice(arr.length - 1000));
         }
 
         const fromObj = (message.envelope.from && message.envelope.from[0]) || {};
@@ -176,7 +182,7 @@ class MailboxWatcher {
           }
         }
 
-        this.log(`🚨 Incoming email (${this.isSpam ? 'SPAM' : 'INBOX'}): "${subject}" from ${senderName}`);
+        this.log(`🚨 Incoming email (${this.isSpam ? 'SPAM' : 'INBOX'}): "${subject}" from ${senderName} [UID ${uid}]`);
 
         await this.onNotification({
           messageId,
@@ -194,6 +200,7 @@ class MailboxWatcher {
       if (lock) {
         lock.release();
       }
+      this.isHandlingNew = false;
     }
   }
 

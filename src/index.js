@@ -103,17 +103,17 @@ function startHealthCheckServer() {
     console.log(`[Daemon] 🌐 Cloud Healthcheck server listening on http://0.0.0.0:${PORT}`);
   });
 
-  // Self-keepalive for Render.com free tier (pings public URL every 10 mins to prevent sleep)
-  const renderUrl = process.env.RENDER_EXTERNAL_URL;
-  if (renderUrl) {
-    console.log(`[Daemon] 🔄 Render.com Keep-Alive active for: ${renderUrl}`);
-    setInterval(async () => {
-      try {
-        await fetch(renderUrl);
-        console.log(`[Daemon] 💓 Self keep-alive ping sent to prevent sleep`);
-      } catch (_) {}
-    }, 10 * 60 * 1000);
-  }
+  // Self-keepalive for Render.com free tier (pings public URL every 5 mins to prevent sleep)
+  const renderUrl = process.env.RENDER_EXTERNAL_URL || 'https://email-alert-daemon.onrender.com';
+  console.log(`[Daemon] 🔄 Render.com Keep-Alive active for: ${renderUrl}`);
+  setInterval(async () => {
+    try {
+      const pingRes = await fetch(renderUrl);
+      if (pingRes.ok) {
+        // Keeps external router session active
+      }
+    } catch (_) {}
+  }, 5 * 60 * 1000);
 }
 
 async function main() {
